@@ -37,12 +37,16 @@ function blotches(ctx, size, count, color, alpha, rMin, rMax) {
 }
 
 // Roughness canvas: start near-white (rough), then paint darker worn patches.
-function roughCanvas(size, base = 235, patches = 10) {
+// patchMin is the floor of the patch grey: a patch darker than ~200 (roughness
+// ~0.72 after the material multiplier) turns into a mirror for the 2.6 sun at
+// grazing angles and blooms into a white glint on flat floors — the mill
+// floor and the site rings are clamped to 200, worn metal keeps 150.
+function roughCanvas(size, base = 235, patches = 10, patchMin = 150) {
   const [c, ctx] = canvas(size);
   ctx.fillStyle = `rgb(${base},${base},${base})`;
   ctx.fillRect(0, 0, size, size);
   for (let i = 0; i < patches; i += 1) {
-    const g = 150 + Math.floor(Math.random() * 60);
+    const g = patchMin + Math.floor(Math.random() * (210 - patchMin));
     ctx.fillStyle = `rgb(${g},${g},${g})`;
     ctx.globalAlpha = 0.25 + Math.random() * 0.3;
     const r = 12 + Math.random() * 50;
@@ -64,11 +68,11 @@ function tex(c, rx = 1, ry = 1, srgb = true) {
   return t;
 }
 
-function pbr(albedo, rx, ry, roughBase = 235) {
+function pbr(albedo, rx, ry, roughBase = 235, patchMin = 150) {
   const size = albedo.width;
   return {
     map: tex(albedo, rx, ry, true),
-    roughnessMap: tex(roughCanvas(size, roughBase), rx, ry, false),
+    roughnessMap: tex(roughCanvas(size, roughBase, 10, patchMin), rx, ry, false),
     bumpMap: tex(albedo, rx, ry, false),
   };
 }
@@ -234,12 +238,12 @@ export function makeTextures() {
   ax.fillRect(0, 0, 64, 64);
 
   return {
-    floor: pbr(fc, 8, 8, 235),
+    floor: pbr(fc, 8, 8, 235, 220),
     brick: pbr(bc, 3, 2, 240),
     timber: pbr(tc, 2, 2, 210),
     paper: pbr(pc, 1, 1, 240),
     metal: pbr(mc, 2, 1, 150),
-    hazard: { map: tex(hc, 1, 1, true), roughnessMap: tex(roughCanvas(256, 220), 1, 1, false), bumpMap: null },
+    hazard: { map: tex(hc, 1, 1, true), roughnessMap: tex(roughCanvas(256, 220, 10, 200), 1, 1, false), bumpMap: null },
     water: { map: tex(wc, 1, 1, true), roughnessMap: tex(roughCanvas(256, 60), 1, 1, false), bumpMap: null },
     blob: tex(sc, 1, 1, false),
     aoStrip: tex(ac, 1, 1, false),

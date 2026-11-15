@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { MAP } from './map.js';
 import { makeTextures } from './textures.js';
+import { mergeParts, part } from './merge.js';
 
 export function createWorld(scene) {
   const textures = makeTextures();
@@ -12,7 +13,7 @@ export function createWorld(scene) {
   // Albedo + roughness + bump on every hero surface; env response tuned so
   // bare steel reads as metal and concrete as matte under the same sun.
   const mats = {
-    floor: new THREE.MeshStandardMaterial({ ...textures.floor, roughness: 0.92, metalness: 0, envMapIntensity: 0.2, bumpScale: 0.03 }),
+    floor: new THREE.MeshStandardMaterial({ ...textures.floor, roughness: 1.0, metalness: 0, envMapIntensity: 0.2, bumpScale: 0.03 }),
     brick: new THREE.MeshStandardMaterial({ ...textures.brick, roughness: 0.94, metalness: 0, envMapIntensity: 0.3, bumpScale: 0.04 }),
     timber: new THREE.MeshStandardMaterial({ ...textures.timber, roughness: 0.8, metalness: 0.02, envMapIntensity: 0.5, bumpScale: 0.02 }),
     timberDark: new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.timberDark), roughness: 0.9 }),
@@ -25,7 +26,7 @@ export function createWorld(scene) {
     rust: new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.accent), roughness: 0.85, metalness: 0.3, envMapIntensity: 0.5 }),
     water: new THREE.MeshStandardMaterial({ ...textures.water, roughness: 0.15, metalness: 0.05, envMapIntensity: 1.0 }),
     hazard: new THREE.MeshStandardMaterial({ ...textures.hazard, roughness: 0.8, metalness: 0 }),
-    paperSheet: new THREE.MeshStandardMaterial({ color: new THREE.Color('#cfc0a0'), roughness: 0.95, side: THREE.DoubleSide, envMapIntensity: 0.25 }),
+    paperSheet: new THREE.MeshStandardMaterial({ color: new THREE.Color('#a89a78'), roughness: 0.95, side: THREE.DoubleSide, envMapIntensity: 0.15 }),
   };
 
   const group = new THREE.Group();
@@ -187,6 +188,37 @@ export function createWorld(scene) {
       addMesh(barrel);
     }
   }
+
+  // Dressing, visual only — no colliders, so the waypoint graph and the
+  // bot audit stay valid. Roof joists over the hall and yards, rust pipes
+  // along the north and west walls, paper stacks on the site crates. Each
+  // group merges to one mesh (one draw call) via the shared merge helper.
+  const joistGeo = new THREE.BoxGeometry(44, 0.25, 0.4);
+  const joists = new THREE.Mesh(mergeParts([-12, -4, 4, 12].map((jz) => part(joistGeo, 0, 4.0, jz))), mats.timberDark);
+  joists.castShadow = true;
+  group.add(joists);
+  const pipeGeo = new THREE.CylinderGeometry(0.09, 0.09, 30, 10);
+  const dropGeo = new THREE.CylinderGeometry(0.09, 0.09, 3.4, 10);
+  const pipeWGeo = new THREE.CylinderGeometry(0.09, 0.09, 24, 10);
+  const pipes = new THREE.Mesh(mergeParts([
+    part(pipeGeo, 0, 3.6, -17.5, 0, 0, Math.PI / 2),
+    part(dropGeo, -12, 1.9, -17.5),
+    part(dropGeo, 12, 1.9, -17.5),
+    part(pipeWGeo, -21.5, 3.6, 0, Math.PI / 2),
+  ]), mats.rust);
+  pipes.castShadow = true;
+  group.add(pipes);
+  const sheetStackGeo = new THREE.BoxGeometry(0.9, 0.05, 0.65);
+  const sheetParts = [];
+  for (const [sx, sz, n] of [[-17, -4.5, 3], [14.5, -4.5, 3], [-5, 11, 2]]) {
+    for (let s = 0; s < n; s += 1) {
+      sheetParts.push(part(sheetStackGeo, sx, 1.24 + s * 0.06, sz, 0, (s - 1) * 0.12, 0));
+    }
+  }
+  const sheets = new THREE.Mesh(mergeParts(sheetParts), mats.paperSheet);
+  sheets.castShadow = true;
+  sheets.receiveShadow = true;
+  group.add(sheets);
 
   // Site markers: a hazard ring on the floor and a hanging sign board.
   for (const key of ['A', 'B']) {

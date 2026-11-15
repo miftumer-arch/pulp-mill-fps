@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { MAP, nearestWaypoint, findPath } from './map.js';
 import { createMover } from './player.js';
 import { WEAPONS } from './weapons.js';
+import { mergeParts, part, limb } from './merge.js';
 
 const CT_NAMES = ['Sari', 'Budi', 'Dewi', 'Agus'];
 const T_NAMES = ['Raka', 'Joko', 'Fajar', 'Bima', 'Eko'];
@@ -25,38 +26,144 @@ const _dir = new THREE.Vector3();
 const _eye = new THREE.Vector3();
 const _chest = new THREE.Vector3();
 
-// A body: legs, vest torso, head, gun. Torso and head are the hit meshes;
-// the material is visible for bots, invisible for the player's own body.
+// ---- Procedural characters -------------------------------------------------
+// A bot is a mill worker in gear, built from primitives only (no model files):
+// hard-hat helmet with a dark visor strip, vest with chest plate, pouches and
+// shoulder pads, aim-posed arms holding a rifle, knee-padded legs, boots and
+// a backpack with a bedroll. Team reads at a glance: green vests / helmets
+// for the Mill Wardens, rust-red for the Pulp Raiders.
+// Presentation contract (build-threejs-enemy-systems): the hitboxes are
+// UNCHANGED — the same two invisible boxes as the old boxy body (torso
+// 0.56x0.72x0.32 at y 1.12, head 0.27 cube at y 1.62), so hits, headshots and
+// collision behave exactly as before; only the visuals change.
+// Draw-call budget: the old body was 6 meshes per bot and the cover view
+// already runs 277 calls against a 300 target, so the new body is also 6
+// visible meshes per bot — parts are merged by material slot, and the torso
+// slot carries its colour variation as vertex colours (vest, dark plate,
+// helmet, pack) instead of extra materials. Legs stay separate groups
+// pivoted at the hip so the walk swing still works. Geometry is built once
+// per team and shared by every bot of that team.
+const TEAM_COLORS = {
+  ct: { vest: 0x3e7a5e, vestDark: 0x2a5443, helmet: 0x33523f },
+  t: { vest: 0xa33b2e, vestDark: 0x752a20, helmet: 0x6e2a20 },
+};
+const PACK_COLOR = 0x4a4238;
+const BOOT_COLOR = 0x1e201d;
+const _hitMat = new THREE.MeshBasicMaterial({ visible: false });
+const _hitTorsoGeo = new THREE.BoxGeometry(0.56, 0.72, 0.32);
+const _hitHeadGeo = new THREE.BoxGeometry(0.27, 0.27, 0.27);
+
+const _teamGeo = {};
+function teamGeometry(team) {
+  if (_teamGeo[team]) return _teamGeo[team];
+  const cols = TEAM_COLORS[team];
+  const B = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+  const C = (rt, rb, h, s = 10) => new THREE.CylinderGeometry(rt, rb, h, s);
+  const S = (r, w = 12, h = 8) => new THREE.SphereGeometry(r, w, h);
+  const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
+  // Aim pose: right hand on the grip, left hand on the fore-end.
+  const shoulderR = V3(0.33, 1.42, -0.02);
+  const shoulderL = V3(-0.33, 1.42, -0.02);
+  const elbowR = V3(0.28, 1.28, -0.24);
+  const elbowL = V3(-0.28, 1.28, -0.24);
+  const handR = V3(0.17, 1.2, -0.32);
+  const handL = V3(0.14, 1.21, -0.46);
+  const g = {
+    // One vertex-coloured mesh: vest, plate, helmet, pack in a single slot.
+    torso: mergeParts([
+      part(B(0.58, 0.62, 0.34), 0, 1.14, 0, 0, 0, 0, 1, 1, 1, cols.vest), // vest body
+      part(B(0.16, 0.09, 0.28), 0.32, 1.45, 0, 0, 0, 0, 1, 1, 1, cols.vest), // shoulder pads
+      part(B(0.16, 0.09, 0.28), -0.32, 1.45, 0, 0, 0, 0, 1, 1, 1, cols.vest),
+      part(B(0.1, 0.13, 0.07), -0.14, 1.02, -0.19, 0, 0, 0, 1, 1, 1, cols.vest), // chest pouches
+      part(B(0.1, 0.13, 0.07), 0, 1.02, -0.19, 0, 0, 0, 1, 1, 1, cols.vest),
+      part(B(0.1, 0.13, 0.07), 0.14, 1.02, -0.19, 0, 0, 0, 1, 1, 1, cols.vest),
+      part(B(0.3, 0.09, 0.26), 0, 1.5, 0, 0, 0, 0, 1, 1, 1, cols.vest), // collar
+      limb(shoulderR, elbowR, 0.065, 0.06, 10, cols.vest), // right upper arm
+      limb(elbowR, handR, 0.055, 0.05, 10, cols.vest), // right forearm
+      limb(shoulderL, elbowL, 0.065, 0.06, 10, cols.vest), // left upper arm
+      limb(elbowL, handL, 0.055, 0.05, 10, cols.vest), // left forearm
+      part(B(0.42, 0.44, 0.05), 0, 1.18, -0.185, 0, 0, 0, 1, 1, 1, cols.vestDark), // chest plate
+      part(B(0.52, 0.09, 0.32), 0, 0.8, 0, 0, 0, 0, 1, 1, 1, cols.vestDark), // belt
+      part(S(0.17), 0, 1.69, 0.01, 0, 0, 0, 1, 0.85, 1.08, cols.helmet), // hard-hat dome
+      part(C(0.2, 0.21, 0.035, 12), 0, 1.665, 0.01, 0, 0, 0, 1, 1, 1, cols.helmet), // brim
+      part(B(0.34, 0.42, 0.13), 0, 1.14, 0.235, 0, 0, 0, 1, 1, 1, PACK_COLOR), // backpack
+      part(C(0.075, 0.075, 0.38), 0, 1.38, 0.24, 0, 0, Math.PI / 2, 1, 1, 1, PACK_COLOR), // bedroll
+    ]),
+    skin: mergeParts([
+      part(B(0.2, 0.22, 0.2), 0, 1.6, -0.01), // face
+      part(C(0.07, 0.08, 0.12), 0, 1.5, 0), // neck
+      part(B(0.07, 0.09, 0.1), 0.17, 1.2, -0.32), // right glove
+      part(B(0.07, 0.09, 0.1), 0.14, 1.21, -0.46), // left glove
+    ]),
+    visor: mergeParts([
+      part(B(0.23, 0.075, 0.05), 0, 1.635, -0.125), // goggle strip
+    ]),
+    gun: mergeParts([
+      part(B(0.07, 0.1, 0.44), 0.18, 1.22, -0.3), // receiver
+      part(C(0.024, 0.024, 0.32, 8), 0.18, 1.235, -0.64, Math.PI / 2), // barrel
+      part(B(0.05, 0.15, 0.09), 0.18, 1.13, -0.26, 0.25), // magazine
+      part(B(0.06, 0.09, 0.18), 0.18, 1.23, -0.05), // stock
+      part(B(0.02, 0.05, 0.02), 0.18, 1.28, -0.55), // front sight
+    ]),
+    // Legs are built in hip-local space (hip at y 0): thigh, shin, knee pad,
+    // boot — one vertex-coloured mesh per leg. Team-independent.
+    leg: mergeParts([
+      part(C(0.095, 0.085, 0.36), 0, -0.18, 0, 0, 0, 0, 1, 1, 1, PANTS),
+      part(C(0.08, 0.07, 0.36), 0, -0.54, 0, 0, 0, 0, 1, 1, 1, PANTS),
+      part(B(0.13, 0.12, 0.06), 0, -0.36, -0.09, 0, 0, 0, 1, 1, 1, PANTS), // knee pad
+      part(B(0.17, 0.1, 0.3), 0, -0.72, -0.03, 0, 0, 0, 1, 1, 1, BOOT_COLOR), // boot
+    ]),
+  };
+  _teamGeo[team] = g;
+  return g;
+}
+
+// A body: detailed procedural character over the original invisible hit
+// boxes. Torso and head are the hit meshes; the material is visible for
+// bots, invisible for the player's own body.
 export function createBodyMeshes(team, visible = true) {
-  const vest = team === 'ct' ? 0x3e7a5e : 0xa33b2e;
-  const vestMat = new THREE.MeshStandardMaterial({ color: vest, roughness: 0.75 });
-  const skinMat = new THREE.MeshStandardMaterial({ color: SKIN, roughness: 0.7 });
-  const pantsMat = new THREE.MeshStandardMaterial({ color: PANTS, roughness: 0.9 });
-  const gunMat = new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.38, metalness: 1.0, envMapIntensity: 1.1 });
+  const g = teamGeometry(team);
+  const mats = {
+    torso: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.75 }),
+    skin: new THREE.MeshStandardMaterial({ color: SKIN, roughness: 0.7 }),
+    leg: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.9 }),
+    visor: new THREE.MeshStandardMaterial({ color: 0x10151c, roughness: 0.12, metalness: 0.85, envMapIntensity: 1.6 }),
+    gun: new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.38, metalness: 1.0, envMapIntensity: 1.1 }),
+  };
   if (!visible) {
-    vestMat.visible = false;
-    skinMat.visible = false;
-    pantsMat.visible = false;
-    gunMat.visible = false;
+    for (const m of Object.values(mats)) m.visible = false;
   }
   const group = new THREE.Group();
-  const legGeo = new THREE.BoxGeometry(0.17, 0.78, 0.2);
-  const legL = new THREE.Mesh(legGeo, pantsMat);
-  legL.position.set(-0.12, 0.39, 0);
-  const legR = new THREE.Mesh(legGeo, pantsMat);
-  legR.position.set(0.12, 0.39, 0);
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.72, 0.32), vestMat);
+  // Hit boxes: invisible, never cast shadows, same dims as the old body.
+  const torso = new THREE.Mesh(_hitTorsoGeo, _hitMat);
   torso.position.y = 1.12;
   torso.userData.part = 'torso';
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.27, 0.27, 0.27), skinMat);
+  const head = new THREE.Mesh(_hitHeadGeo, _hitMat);
   head.position.y = 1.62;
   head.userData.part = 'head';
-  const cap = new THREE.Mesh(new THREE.BoxGeometry(0.29, 0.09, 0.29), vestMat);
-  cap.position.y = 1.78;
-  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.11, 0.6), gunMat);
-  gun.position.set(0.18, 1.22, -0.32);
-  group.add(legL, legR, torso, head, cap, gun);
-  group.traverse((m) => { if (m.isMesh) { m.castShadow = true; } });
+  group.add(torso, head);
+  // Visual meshes: 6 per bot, the same count as the old boxy body.
+  const visual = [
+    [g.torso, mats.torso], [g.skin, mats.skin],
+    [g.visor, mats.visor], [g.gun, mats.gun],
+  ];
+  for (const [geo, mat] of visual) {
+    const m = new THREE.Mesh(geo, mat);
+    m.castShadow = true;
+    group.add(m);
+  }
+  // Legs: groups pivoted at the hip so the walk swing rotates them there.
+  function makeLeg(side) {
+    const leg = new THREE.Group();
+    leg.position.set(0.12 * side, 0.78, 0);
+    const mesh = new THREE.Mesh(g.leg, mats.leg);
+    mesh.castShadow = true;
+    leg.add(mesh);
+    group.add(leg);
+    return leg;
+  }
+  const legL = makeLeg(-1);
+  const legR = makeLeg(1);
   return { group, torso, head, legL, legR };
 }
 
